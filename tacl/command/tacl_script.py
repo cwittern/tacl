@@ -1,17 +1,14 @@
-#!/usr/bin/env python3
-
 """Command-line script to perform n-gram analysis of a corpus of
 texts."""
 
 import argparse
 import io
 import logging
-import re
 import sys
-import textwrap
 
 import tacl
 from tacl import constants
+from tacl.command.formatters import ParagraphFormatter
 
 
 logger = logging.getLogger('tacl')
@@ -23,7 +20,7 @@ def main ():
     if hasattr(args, 'verbose'):
         configure_logging(args.verbose)
     if hasattr(args, 'func'):
-        args.func(args)
+        args.func(args, parser)
     else:
         parser.print_help()
 
@@ -32,34 +29,64 @@ def add_common_arguments (parser):
     parser.add_argument('-v', '--verbose', action='count',
                         help=constants.VERBOSE_HELP)
 
-def add_db_arguments (parser):
-    """Adds common arguments for the database sub-commands to
+def add_corpus_arguments (parser):
+    """Adds common arguments for commands making use of a corpus to
     `parser`."""
+    add_tokenizer_argument(parser)
+    parser.add_argument('corpus', help=constants.DB_CORPUS_HELP,
+                        metavar='CORPUS')
+
+def add_db_arguments (parser, db_option=False):
+    """Adds common arguments for the database sub-commands to
+    `parser`.
+
+    `db_option` provides a means to work around
+    https://bugs.python.org/issue9338 whereby a positional argument
+    that follows an optional argument with nargs='+' will not be
+    recognised. When `db_optional` is True, create the database
+    argument as a required optional argument, rather than a positional
+    argument.
+
+    """
     parser.add_argument('-m', '--memory', action='store_true',
                         help=constants.DB_MEMORY_HELP)
     parser.add_argument('-r', '--ram', default=3, help=constants.DB_RAM_HELP,
                         type=int)
-    add_tokenizer_argument(parser)
-    parser.add_argument('db', help=constants.DB_DATABASE_HELP,
-                        metavar='DATABASE')
-    parser.add_argument('corpus', help=constants.DB_CORPUS_HELP,
-                        metavar='CORPUS')
-
-def add_input_arguments (parser):
-    """Adds common arguments for queries that allow a supplied results
-    file."""
-    parser.add_argument('-i', '--input', help=constants.INPUT_RESULTS_HELP,
-                        metavar='INPUT_RESULTS')
+    if db_option:
+        parser.add_argument('-d', '--db', help=constants.DB_DATABASE_HELP,
+                            metavar='DATABASE', required=True)
+    else:
+        parser.add_argument('db', help=constants.DB_DATABASE_HELP,
+                            metavar='DATABASE')
 
 def add_query_arguments (parser):
     """Adds common arguments for query sub-commonads to `parser`."""
     parser.add_argument('catalogue', help=constants.CATALOGUE_CATALOGUE_HELP,
                         metavar='CATALOGUE')
 
+def add_supplied_query_arguments (parser):
+    """Adds common arguments for supplied query sub-commands to
+    `parser`."""
+    parser.add_argument('-l', '--labels', help=constants.SUPPLIED_LABELS_HELP,
+                        nargs='+', required=True)
+    parser.add_argument('-s', '--supplied', help=constants.SUPPLIED_RESULTS_HELP,
+                        metavar='RESULTS', nargs='+', required=True)
+
 def add_tokenizer_argument (parser):
     parser.add_argument('-t', '--tokenizer', choices=constants.TOKENIZER_CHOICES,
                         default=constants.TOKENIZER_CHOICE_CBETA,
                         help=constants.DB_TOKENIZER_HELP)
+
+def align_results (args, parser):
+    if args.results == '-':
+        results = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8',
+                                   newline='')
+    else:
+        results = open(args.results, 'r', encoding='utf-8', newline='')
+    tokenizer = get_tokenizer(args)
+    corpus = tacl.Corpus(args.corpus, tokenizer)
+    s = tacl.Sequencer(corpus, tokenizer, results, args.output)
+    s.generate_sequences(args.minimum)
 
 def configure_logging (verbose):
     """Configures the logging used."""
@@ -83,19 +110,40 @@ def generate_parser ():
         description=constants.TACL_DESCRIPTION,
         formatter_class=ParagraphFormatter)
     subparsers = parser.add_subparsers(title='subcommands')
+    generate_align_subparser(subparsers)
     generate_catalogue_subparser(subparsers)
     generate_counts_subparser(subparsers)
     generate_diff_subparser(subparsers)
     generate_highlight_subparser(subparsers)
     generate_intersect_subparser(subparsers)
     generate_ngrams_subparser(subparsers)
+    generate_prepare_subparser(subparsers)
     generate_report_subparser(subparsers)
+    generate_supplied_diff_subparser(subparsers)
     generate_search_subparser(subparsers)
+    generate_supplied_intersect_subparser(subparsers)
     generate_statistics_subparser(subparsers)
     generate_strip_subparser(subparsers)
     return parser
 
-def generate_catalogue (args):
+def generate_align_subparser (subparsers):
+    """Adds a sub-command parser to `subparsers` to generate aligned
+    sequences from a set of results."""
+    parser = subparsers.add_parser(
+        'align', description=constants.ALIGN_DESCRIPTION,
+        epilog=constants.ALIGN_EPILOG,
+        formatter_class=ParagraphFormatter, help=constants.ALIGN_HELP)
+    parser.set_defaults(func=align_results)
+    add_common_arguments(parser)
+    parser.add_argument('-m', '--minimum', default=20,
+                        help=constants.ALIGN_MINIMUM_SIZE_HELP, type=int)
+    add_corpus_arguments(parser)
+    parser.add_argument('output', help=constants.ALIGN_OUTPUT_HELP,
+                        metavar='OUTPUT')
+    parser.add_argument('results', help=constants.REPORT_RESULTS_HELP,
+                        metavar='RESULTS')
+
+def generate_catalogue (args, parser):
     """Generates and saves a catalogue file."""
     catalogue = tacl.Catalogue()
     catalogue.generate(args.corpus, args.label)
@@ -126,6 +174,7 @@ def generate_counts_subparser (subparsers):
     parser.set_defaults(func=ngram_counts)
     add_common_arguments(parser)
     add_db_arguments(parser)
+    add_corpus_arguments(parser)
     add_query_arguments(parser)
 
 def generate_diff_subparser (subparsers):
@@ -137,11 +186,11 @@ def generate_diff_subparser (subparsers):
         help=constants.DIFF_HELP)
     parser.set_defaults(func=ngram_diff)
     group = parser.add_mutually_exclusive_group()
-    add_input_arguments(group)
     group.add_argument('-a', '--asymmetric', help=constants.ASYMMETRIC_HELP,
                        metavar='LABEL')
     add_common_arguments(parser)
     add_db_arguments(parser)
+    add_corpus_arguments(parser)
     add_query_arguments(parser)
 
 def generate_highlight_subparser (subparsers):
@@ -149,16 +198,17 @@ def generate_highlight_subparser (subparsers):
     its matches in a result."""
     parser = subparsers.add_parser(
         'highlight', description=constants.HIGHLIGHT_DESCRIPTION,
-        epilog=constants.HIGHLIGHT_EPILOG, help=constants.HIGHLIGHT_HELP)
+        epilog=constants.HIGHLIGHT_EPILOG, formatter_class=ParagraphFormatter,
+        help=constants.HIGHLIGHT_HELP)
     parser.set_defaults(func=highlight_text)
     add_common_arguments(parser)
-    add_tokenizer_argument(parser)
-    parser.add_argument('corpus', help=constants.DB_CORPUS_HELP,
-                        metavar='CORPUS')
+    add_corpus_arguments(parser)
     parser.add_argument('results', help=constants.STATISTICS_RESULTS_HELP,
                         metavar='RESULTS')
-    parser.add_argument('base', help=constants.HIGHLIGHT_BASE_HELP,
-                        metavar='BASE_FILENAME')
+    parser.add_argument('base_name', help=constants.HIGHLIGHT_BASE_NAME_HELP,
+                        metavar='BASE_NAME')
+    parser.add_argument('base_siglum', metavar='BASE_SIGLUM',
+                        help=constants.HIGHLIGHT_BASE_SIGLUM_HELP)
 
 def generate_intersect_subparser (subparsers):
     """Adds a sub-command parser to `subparsers` to make an
@@ -168,12 +218,12 @@ def generate_intersect_subparser (subparsers):
         epilog=constants.INTERSECT_EPILOG, formatter_class=ParagraphFormatter,
         help=constants.INTERSECT_HELP)
     parser.set_defaults(func=ngram_intersection)
-    add_input_arguments(parser)
     add_common_arguments(parser)
     add_db_arguments(parser)
+    add_corpus_arguments(parser)
     add_query_arguments(parser)
 
-def generate_ngrams (args):
+def generate_ngrams (args, parser):
     """Adds n-grams data to the data store."""
     store = get_data_store(args)
     corpus = get_corpus(args)
@@ -188,37 +238,24 @@ def generate_ngrams_subparser (subparsers):
     parser.set_defaults(func=generate_ngrams)
     add_common_arguments(parser)
     add_db_arguments(parser)
+    add_corpus_arguments(parser)
     parser.add_argument('min_size', help=constants.NGRAMS_MINIMUM_HELP,
                         metavar='MINIMUM', type=int)
     parser.add_argument('max_size', help=constants.NGRAMS_MAXIMUM_HELP,
                         metavar='MAXIMUM', type=int)
 
-def generate_report (args):
-    if args.results == '-':
-        results = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8',
-                                   newline='')
-    else:
-        results = open(args.results, 'r', encoding='utf-8', newline='')
-    tokenizer = get_tokenizer(args)
-    report = tacl.Report(results, tokenizer)
-    if args.extend:
-        corpus = tacl.Corpus(args.extend, tokenizer)
-        report.extend(corpus)
-    if args.reduce:
-        report.reduce()
-    if args.reciprocal:
-        report.reciprocal_remove()
-    if args.min_texts or args.max_texts:
-        report.prune_by_text_count(args.min_texts, args.max_texts)
-    if args.min_size or args.max_size:
-        report.prune_by_ngram_size(args.min_size, args.max_size)
-    if args.min_count or args.max_count:
-        report.prune_by_ngram_count(args.min_count, args.max_count)
-    if args.remove:
-        report.remove_label(args.remove)
-    if args.sort:
-        report.sort()
-    report.csv(sys.stdout)
+def generate_prepare_subparser (subparsers):
+    """Adds a sub-command parser to `subparsers` to prepare source XML
+    files for stripping."""
+    parser = subparsers.add_parser(
+        'prepare', description=constants.PREPARE_DESCRIPTION,
+        formatter_class=ParagraphFormatter, help=constants.PREPARE_HELP)
+    parser.set_defaults(func=prepare_xml)
+    add_common_arguments(parser)
+    parser.add_argument('input', help=constants.PREPARE_INPUT_HELP,
+                        metavar='INPUT')
+    parser.add_argument('output', help=constants.PREPARE_OUTPUT_HELP,
+                        metavar='OUTPUT')
 
 def generate_report_subparser (subparsers):
     """Adds a sub-command parser to `subparsers` to manipulate CSV
@@ -228,7 +265,10 @@ def generate_report_subparser (subparsers):
         epilog=constants.REPORT_EPILOG, formatter_class=ParagraphFormatter,
         help=constants.REPORT_HELP)
     add_common_arguments(parser)
-    parser.set_defaults(func=generate_report)
+    parser.set_defaults(func=report)
+    parser.add_argument('-c', '--catalogue', dest='catalogue',
+                        help=constants.REPORT_CATALOGUE_HELP,
+                        metavar='CATALOGUE')
     parser.add_argument('-e', '--extend', dest='extend',
                         help=constants.REPORT_EXTEND_HELP, metavar='CORPUS')
     parser.add_argument('--min-count', dest='min_count',
@@ -258,6 +298,8 @@ def generate_report_subparser (subparsers):
     parser.add_argument('--sort', action='store_true',
                         help=constants.REPORT_SORT_HELP)
     add_tokenizer_argument(parser)
+    parser.add_argument('-z', '--zero-fill', dest='zero_fill',
+                        help=constants.REPORT_ZERO_FILL_HELP, metavar='CORPUS')
     parser.add_argument('results', help=constants.REPORT_RESULTS_HELP,
                         metavar='RESULTS')
 
@@ -266,21 +308,20 @@ def generate_search_subparser (subparsers):
     results for a set of n-grams."""
     parser = subparsers.add_parser(
         'search', description=constants.SEARCH_DESCRIPTION,
-        help=constants.SEARCH_HELP)
+        formatter_class=ParagraphFormatter, help=constants.SEARCH_HELP)
     parser.set_defaults(func=search_texts)
     add_common_arguments(parser)
     add_db_arguments(parser)
+    add_corpus_arguments(parser)
     parser.add_argument('-c', '--catalogue', metavar='CATALOGUE',
                         help=constants.CATALOGUE_CATALOGUE_HELP)
     parser.add_argument('ngrams', help=constants.SEARCH_NGRAMS_HELP,
                         metavar='NGRAMS')
 
-def generate_statistics (args):
-    results = open(args.results, 'r', encoding='utf-8', newline='')
-    counts = open(args.counts, 'r', encoding='utf-8', newline='')
-    report = tacl.StatisticsReport(results, counts)
-    if args.reduce:
-        report.reduce()
+def generate_statistics (args, parser):
+    corpus = get_corpus(args)
+    tokenizer = get_tokenizer(args)
+    report = tacl.StatisticsReport(corpus, tokenizer, args.results)
     report.generate_statistics()
     report.csv(sys.stdout)
 
@@ -289,23 +330,20 @@ def generate_statistics_subparser (subparsers):
     from a set of results."""
     parser = subparsers.add_parser(
         'stats', description=constants.STATISTICS_DESCRIPTION,
-        epilog=constants.STATISTICS_EPILOG,
-        help=constants.STATISTICS_HELP)
+        formatter_class=ParagraphFormatter, help=constants.STATISTICS_HELP)
     parser.set_defaults(func=generate_statistics)
     add_common_arguments(parser)
-    parser.add_argument('--reduce', action='store_true',
-                        help=constants.REPORT_REDUCE_HELP)
+    add_corpus_arguments(parser)
     parser.add_argument('results', help=constants.STATISTICS_RESULTS_HELP,
                         metavar='RESULTS')
-    parser.add_argument('counts', help=constants.STATISTICS_COUNTS_HELP,
-                        metavar='COUNTS')
 
 def generate_strip_subparser (subparsers):
     """Adds a sub-command parser to `subparsers` to process original
     texts for use with the tacl ngrams command."""
     parser = subparsers.add_parser(
         'strip', description=constants.STRIP_DESCRIPTION,
-        epilog=constants.STRIP_EPILOG, help=constants.STRIP_HELP)
+        epilog=constants.STRIP_EPILOG, formatter_class=ParagraphFormatter,
+        help=constants.STRIP_HELP)
     parser.set_defaults(func=strip_texts)
     add_common_arguments(parser)
     parser.add_argument('input', help=constants.STRIP_INPUT_HELP,
@@ -313,76 +351,135 @@ def generate_strip_subparser (subparsers):
     parser.add_argument('output', help=constants.STRIP_OUTPUT_HELP,
                         metavar='OUTPUT')
 
+def generate_supplied_diff_subparser (subparsers):
+    """Adds a sub-command parser to `subparsers` to run a diff query using
+    the supplied results sets."""
+    parser = subparsers.add_parser(
+        'sdiff', description=constants.SUPPLIED_DIFF_DESCRIPTION,
+        epilog=constants.SUPPLIED_DIFF_EPILOG,
+        formatter_class=ParagraphFormatter, help=constants.SUPPLIED_DIFF_HELP)
+    parser.set_defaults(func=supplied_diff)
+    add_common_arguments(parser)
+    add_db_arguments(parser, True)
+    add_supplied_query_arguments(parser)
+
+def generate_supplied_intersect_subparser (subparsers):
+    """Adds a sub-command parser to `subparsers` to run an intersect query
+    using the supplied results sets."""
+    parser = subparsers.add_parser(
+        'sintersect', description=constants.SUPPLIED_INTERSECT_DESCRIPTION,
+        epilog=constants.SUPPLIED_INTERSECT_EPILOG,
+        formatter_class=ParagraphFormatter,
+        help=constants.SUPPLIED_INTERSECT_HELP)
+    parser.set_defaults(func=supplied_intersect)
+    add_common_arguments(parser)
+    add_db_arguments(parser, True)
+    add_supplied_query_arguments(parser)
+
 def get_corpus (args):
     """Returns a `tacl.Corpus`."""
     tokenizer = get_tokenizer(args)
     return tacl.Corpus(args.corpus, tokenizer)
 
-def get_catalogue (args):
+def get_catalogue (path):
     """Returns a `tacl.Catalogue`."""
     catalogue = tacl.Catalogue()
-    catalogue.load(args.catalogue)
+    catalogue.load(path)
     return catalogue
-
-def get_input_fh (arg):
-    """Returns an open file of CSV data, or None if `arg` is None.
-
-    """
-    input_fh = None
-    if arg:
-        input_fh = open(arg, 'r', encoding='utf-8', newline='')
-    return input_fh
 
 def get_data_store (args):
     """Returns a `tacl.DataStore`."""
     return tacl.DataStore(args.db, args.memory, args.ram)
 
+def get_input_fh (arg):
+    """Returns an open file of CSV data, or None if `arg` is None."""
+    input_fh = None
+    if arg:
+        input_fh = open(arg, 'r', encoding='utf-8', newline='')
+    return input_fh
+
 def get_tokenizer (args):
     return tacl.Tokenizer(*constants.TOKENIZERS[args.tokenizer])
 
-def highlight_text (args):
+def highlight_text (args, parser):
     """Outputs the result of highlighting a text."""
     tokenizer = get_tokenizer(args)
     corpus = get_corpus(args)
     highlighter = tacl.Highlighter(corpus, tokenizer)
-    text = highlighter.highlight(args.results, args.base)
+    text = highlighter.highlight(args.results, args.base_name, args.base_siglum)
     print(text)
 
-def ngram_counts (args):
+def ngram_counts (args, parser):
     """Outputs the results of performing a counts query."""
     store = get_data_store(args)
     corpus = get_corpus(args)
-    catalogue = get_catalogue(args)
+    catalogue = get_catalogue(args.catalogue)
     store.validate(corpus, catalogue)
     store.counts(catalogue, sys.stdout)
 
-def ngram_diff (args):
+def ngram_diff (args, parser):
     """Outputs the results of performing a diff query."""
     store = get_data_store(args)
     corpus = get_corpus(args)
-    catalogue = get_catalogue(args)
-    input_fh = get_input_fh(args.input)
+    catalogue = get_catalogue(args.catalogue)
     store.validate(corpus, catalogue)
-    if input_fh:
-        store.diff_supplied(catalogue, input_fh, sys.stdout)
-    elif args.asymmetric:
+    if args.asymmetric:
         store.diff_asymmetric(catalogue, args.asymmetric, sys.stdout)
     else:
         store.diff(catalogue, sys.stdout)
 
-def ngram_intersection (args):
+def ngram_intersection (args, parser):
     """Outputs the results of performing an intersection query."""
     store = get_data_store(args)
     corpus = get_corpus(args)
-    catalogue = get_catalogue(args)
-    input_fh = get_input_fh(args.input)
+    catalogue = get_catalogue(args.catalogue)
     store.validate(corpus, catalogue)
-    if input_fh:
-        store.intersection_supplied(catalogue, input_fh, sys.stdout)
-    else:
-        store.intersection(catalogue, sys.stdout)
+    store.intersection(catalogue, sys.stdout)
 
-def search_texts (args):
+def prepare_xml (args, parser):
+    """Prepares XML texts for stripping.
+
+    This process creates a single, normalised TEI XML file for each
+    text.
+
+    """
+    corpus = tacl.TEICorpus(args.input, args.output)
+    corpus.tidy()
+
+def report (args, parser):
+    if args.results == '-':
+        results = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8',
+                                   newline='')
+    else:
+        results = open(args.results, 'r', encoding='utf-8', newline='')
+    tokenizer = get_tokenizer(args)
+    report = tacl.Report(results, tokenizer)
+    if args.extend:
+        corpus = tacl.Corpus(args.extend, tokenizer)
+        report.extend(corpus)
+    if args.reduce:
+        report.reduce()
+    if args.reciprocal:
+        report.reciprocal_remove()
+    if args.zero_fill:
+        if not args.catalogue:
+            parser.error('The zero-fill option requires that the -c option also be supplied.')
+        corpus = tacl.Corpus(args.zero_fill, tokenizer)
+        catalogue = get_catalogue(args.catalogue)
+        report.zero_fill(corpus, catalogue)
+    if args.min_texts or args.max_texts:
+        report.prune_by_text_count(args.min_texts, args.max_texts)
+    if args.min_size or args.max_size:
+        report.prune_by_ngram_size(args.min_size, args.max_size)
+    if args.min_count or args.max_count:
+        report.prune_by_ngram_count(args.min_count, args.max_count)
+    if args.remove:
+        report.remove_label(args.remove)
+    if args.sort:
+        report.sort()
+    report.csv(sys.stdout)
+
+def search_texts (args, parser):
     """Searches texts for presence of n-grams."""
     store = get_data_store(args)
     corpus = get_corpus(args)
@@ -394,88 +491,20 @@ def search_texts (args):
         ngrams = [ngram.strip() for ngram in fh.readlines()]
     store.search(catalogue, ngrams, sys.stdout)
 
-def strip_texts (args):
-    """Processes texts for use with the tacl ngrams command."""
+def strip_texts (args, parser):
+    """Processes prepared XML texts for use with the tacl ngrams
+    command."""
     stripper = tacl.Stripper(args.input, args.output)
     stripper.strip_files()
 
+def supplied_diff (args, parser):
+    labels = args.labels
+    results = args.supplied
+    store = get_data_store(args)
+    store.diff_supplied(results, labels, sys.stdout)
 
-class ParagraphFormatter (argparse.HelpFormatter):
-
-    """argparse formatter to maintain paragraph breaks in text, while
-    wrapping those blocks.
-
-    Code minimally adapted from the patch at
-    http://bugs.python.org/file28091, authored by rurpy2.
-
-    """
-
-    def _split_lines (self, text, width):
-        return self._para_reformat(text, width, multiline=True)
-
-    def _fill_text (self, text, width, indent):
-        lines = self._para_reformat(text, width, indent, True)
-        return '\n'.join(lines)
-
-    def _para_reformat (self, text, width, indent='', multiline=False):
-        new_lines = list()
-        main_indent = len(re.match(r'( *)', text).group(1))
-
-        def blocker (text):
-            """On each call yields 2-tuple consisting of a boolean and
-            the next block of text from 'text'.  A block is either a
-            single line, or a group of contiguous lines.  The former
-            is returned when not in multiline mode, the text in the
-            line was indented beyond the indentation of the first
-            line, or it was a blank line (the latter two jointly
-            referred to as "no-wrap" lines).  A block of concatenated
-            text lines up to the next no-wrap line is returned when
-            in multiline mode.  The boolean value indicates whether
-            text wrapping should be done on the returned text."""
-            block = list()
-            for line in text.splitlines():
-                line_indent = len(re.match(r'( *)', line).group(1))
-                isindented = line_indent - main_indent > 0
-                isblank = re.match(r'\s*$', line)
-                if isblank or isindented:
-                    # A no-wrap line.
-                    if block:
-                        # Yield previously accumulated block of text
-                        # if any, for wrapping.
-                        yield True, ''.join(block)
-                        block = list()
-                    # And now yield our no-wrap line.
-                    yield False, line
-                else:
-                    # We have a regular text line.
-                    if multiline:
-                        # In multiline mode accumulate it.
-                        block.append(line)
-                    else:
-                        # Not in multiline mode, yield it for
-                        # wrapping.
-                        yield True, line
-            if block:
-                # Yield any text block left over.
-                yield (True, ''.join(block))
-
-        for wrap, line in blocker(text):
-            if wrap:
-                # We have either a single line or a group of
-                # concatented lines.  Either way, we treat them as a
-                # block of text and wrap them (after reducing multiple
-                # whitespace to just single space characters).
-                line = self._whitespace_matcher.sub(' ', line).strip()
-                # Textwrap will do all the hard work for us.
-                new_lines.extend(textwrap.wrap(text=line, width=width,
-                                               initial_indent=indent,
-                                               subsequent_indent=indent))
-            else:
-                # The line was a no-wrap one so leave the formatting
-                # alone.
-                new_lines.append(line[main_indent:])
-        return new_lines
-
-
-if __name__ == '__main__':
-    main()
+def supplied_intersect (args, parser):
+    labels = args.labels
+    results = args.supplied
+    store = get_data_store(args)
+    store.intersection_supplied(results, labels, sys.stdout)

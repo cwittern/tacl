@@ -27,8 +27,8 @@ class ReportIntegrationTestCase (TaclTestCase):
         actual_rows = self._get_rows_from_csv(io.StringIO(data.decode('utf-8')))
         expected_results = os.path.join(self._data_dir,
                                         'cbeta-extend-results.csv')
-        expected_rows = self._get_rows_from_csv(open(expected_results,
-                                                     newline=''))
+        with open(expected_results, newline='') as fh:
+            expected_rows = self._get_rows_from_csv(fh)
         self.assertEqual(set(actual_rows), set(expected_rows))
 
     def test_extend_pagel (self):
@@ -40,8 +40,38 @@ class ReportIntegrationTestCase (TaclTestCase):
         actual_rows = self._get_rows_from_csv(io.StringIO(data.decode('utf-8')))
         expected_results = os.path.join(self._data_dir,
                                         'pagel-extend-results.csv')
-        expected_rows = self._get_rows_from_csv(open(expected_results,
-                                                     newline=''))
+        with open(expected_results, newline='') as fh:
+            expected_rows = self._get_rows_from_csv(fh)
+        self.assertEqual(set(actual_rows), set(expected_rows))
+
+    def test_extend_multiply_labelled (self):
+        # Test that a witness that exists under more than one label is
+        # properly extended.
+        results = os.path.join(self._data_dir,
+                               'multiply-labelled-non-extend-results.csv')
+        command = 'tacl report -e {} -t {} {}'.format(
+            os.path.join(self._stripped_dir, 'multiply-labelled'),
+            tacl.constants.TOKENIZER_CHOICE_CBETA, results)
+        data = subprocess.check_output(shlex.split(command))
+        actual_rows = self._get_rows_from_csv(io.StringIO(data.decode('utf-8')))
+        expected_results = os.path.join(self._data_dir,
+                                        'multiply-labelled-extend-results.csv')
+        with open(expected_results, newline='') as fh:
+            expected_rows = self._get_rows_from_csv(fh)
+        self.assertEqual(set(actual_rows), set(expected_rows))
+
+    def test_zero_fill (self):
+        data_dir = os.path.join(os.path.dirname(__file__), 'data')
+        corpus = os.path.join(data_dir, 'stripped')
+        catalogue = os.path.join(data_dir, 'catalogue.txt')
+        results = os.path.join(data_dir, 'non-zero-fill-results.csv')
+        command = 'tacl report -c {} -z {} {}'.format(catalogue, corpus,
+                                                      results)
+        data = subprocess.check_output(shlex.split(command))
+        actual_rows = self._get_rows_from_csv(io.StringIO(data.decode('utf-8')))
+        expected_results = os.path.join(data_dir, 'zero-fill-results.csv')
+        with open(expected_results, newline='') as fh:
+            expected_rows = self._get_rows_from_csv(fh)
         self.assertEqual(set(actual_rows), set(expected_rows))
 
 

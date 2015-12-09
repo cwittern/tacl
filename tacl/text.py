@@ -2,6 +2,7 @@
 
 import collections
 import hashlib
+import os.path
 
 
 class BaseText:
@@ -18,7 +19,7 @@ class BaseText:
         """
         return self._content
 
-    def get_ngrams (self, minimum, maximum):
+    def get_ngrams (self, minimum, maximum, skip_sizes=None):
         """Returns a generator supplying the n-grams (`minimum` <= n
         <= `maximum`) for this text.
 
@@ -33,10 +34,12 @@ class BaseText:
         :rtype: `generator`
 
         """
+        skip_sizes = skip_sizes or []
         tokens = self.get_tokens()
         for size in range(minimum, maximum + 1):
-            ngrams = collections.Counter(self._ngrams(tokens, size))
-            yield (size, ngrams)
+            if size not in skip_sizes:
+                ngrams = collections.Counter(self._ngrams(tokens, size))
+                yield (size, ngrams)
 
     def get_tokens (self):
         """Returns a list of tokens in this text."""
@@ -68,9 +71,15 @@ class BaseText:
 
 class Text (BaseText):
 
-    def __init__ (self, filename, content, tokenizer):
+    def __init__ (self, name, siglum, content, tokenizer):
         super().__init__(content, tokenizer)
-        self._filename = filename
+        self._name = name
+        self._siglum = siglum
+        self._filename = self.assemble_filename(name, siglum)
+
+    @staticmethod
+    def assemble_filename (name, siglum):
+        return os.path.join(name, siglum + '.txt')
 
     def get_checksum (self):
         """Returns the checksum for the content of this text.
@@ -87,3 +96,11 @@ class Text (BaseText):
 
         """
         return self._filename
+
+    def get_names (self):
+        """Returns the name and siglum of this text.
+
+        :rtype: `tuple`
+
+        """
+        return self._name, self._siglum

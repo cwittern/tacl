@@ -1,18 +1,26 @@
-#!/usr/bin/env python3
-
 import argparse
 import logging
 import os
+import sys
+
+import pandas as pd
 
 import tacl
 from tacl import constants
 
 
+logger = logging.getLogger('tacl')
+
+
 def main ():
     parser = generate_parser()
     args = parser.parse_args()
-    configure_logging(args.verbose)
-    args.func(args)
+    if hasattr(args, 'verbose'):
+        configure_logging(args.verbose)
+    if hasattr(args, 'func'):
+        args.func(args)
+    else:
+        parser.print_help()
 
 def add_common_arguments (parser):
     """Adds common arguments for all parsers."""
@@ -30,8 +38,43 @@ def add_db_arguments (parser):
     parser.add_argument('corpus', help=constants.DB_CORPUS_HELP,
                         metavar='CORPUS')
 
+def collapse_witnesses (args):
+    results = open(args.results, 'r', encoding='utf-8', newline='')
+    _collapse_witnesses(results, sys.stdout)
+
+def _collapse_witnesses (results_fh, output_fh):
+    logger.debug('Loading results')
+    results = pd.read_csv(results_fh, encoding='utf-8')
+    logger.debug('Loaded results')
+    grouped = results.groupby(
+        [constants.NAME_FIELDNAME, constants.NGRAM_FIELDNAME,
+         constants.COUNT_FIELDNAME], sort=False)
+    logger.debug('Grouped results')
+    output_rows = []
+    for indices in iter(grouped.groups.values()):
+        logger.debug('Handling group')
+        sigla = []
+        for index in indices:
+            row_data = dict(results.iloc[index])
+            siglum = row_data['siglum']
+            if ' ' in siglum:
+                siglum = '"{}"'.format(siglum)
+            sigla.append(siglum)
+        sigla.sort()
+        # This does not even try to escape sigla that contain spaces.
+        row_data['sigla'] = ' '.join(sigla)
+        del row_data['siglum']
+        output_rows.append(row_data)
+    results = None
+    logger.debug('Building new results')
+    columns = [constants.NGRAM_FIELDNAME, constants.SIZE_FIELDNAME,
+               constants.NAME_FIELDNAME, 'sigla', constants.COUNT_FIELDNAME,
+               constants.LABEL_FIELDNAME]
+    out_df = pd.DataFrame(output_rows, columns=columns)
+    out_df.to_csv(output_fh, encoding='utf-8', index=False)
+    return output_fh
+
 def configure_logging (verbose):
-    logger = logging.getLogger('tacl')
     if not verbose:
         log_level = logging.WARNING
     elif verbose == 1:
@@ -46,7 +89,6 @@ def configure_logging (verbose):
     ch.setFormatter(formatter)
     logger.addHandler(ch)
 
-
 def _copy_options (args):
     """Returns a string form of the options in `args`."""
     options = []
@@ -60,17 +102,30 @@ def _copy_options (args):
 
 def generate_parser ():
     parser = argparse.ArgumentParser(
-        description=constants.TACL_HELPER_DESCRIPTION)
+        description=constants.TACL_HELPER_DESCRIPTION,
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     subparsers = parser.add_subparsers(title='subcommands')
     generate_text_against_corpus_subparser(subparsers)
     generate_text_in_corpus_subparser(subparsers)
+    generate_collapse_witness_results_subparser(subparsers)
     return parser
+
+def generate_collapse_witness_results_subparser (subparsers):
+    parser = subparsers.add_parser(
+        'collapse-witnesses',
+        description=constants.TACL_HELPER_COLLAPSE_DESCRIPTION,
+        help=constants.TACL_HELPER_COLLAPSE_HELP)
+    parser.set_defaults(func=collapse_witnesses)
+    add_common_arguments(parser)
+    parser.add_argument('results', help=constants.TACL_HELPER_RESULTS_HELP,
+                        metavar='RESULTS')
 
 def generate_text_against_corpus_subparser (subparsers):
     parser = subparsers.add_parser(
         'text-against-corpus',
         description=constants.TACL_HELPER_AGAINST_DESCRIPTION,
-        help=constants.TACL_HELPER_AGAINST_HELP)
+        help=constants.TACL_HELPER_AGAINST_HELP,
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.set_defaults(func=text_against_corpus)
     add_common_arguments(parser)
     add_db_arguments(parser)
@@ -85,7 +140,8 @@ def generate_text_against_corpus_subparser (subparsers):
 def generate_text_in_corpus_subparser (subparsers):
     parser = subparsers.add_parser(
         'text-in-corpus', description=constants.TACL_HELPER_IN_DESCRIPTION,
-        help=constants.TACL_HELPER_IN_HELP)
+        help=constants.TACL_HELPER_IN_HELP,
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.set_defaults(func=text_in_corpus)
     add_common_arguments(parser)
     add_db_arguments(parser)
@@ -150,8 +206,3 @@ def text_in_corpus (args):
     commands_path = os.path.join(output_dir, 'commands')
     with open(commands_path, 'w') as fh:
         fh.writelines(commands)
-
-
-
-if __name__ == '__main__':
-    main()

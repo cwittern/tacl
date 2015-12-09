@@ -4,8 +4,10 @@ import csv
 import logging
 import os.path
 import sqlite3
+import sys
 
 from . import constants
+from .exceptions import MalformedQueryError
 
 
 class DataStore:
@@ -61,9 +63,44 @@ class DataStore:
 
     def _add_temporary_ngrams (self, ngrams):
         """Adds `ngrams` to a temporary table."""
-        self._conn.execute(constants.CREATE_TEMPORARY_TABLE_SQL)
+        self._conn.execute(constants.DROP_TEMPORARY_NGRAMS_TABLE_SQL)
+        self._conn.execute(constants.CREATE_TEMPORARY_NGRAMS_TABLE_SQL)
         self._conn.executemany(constants.INSERT_TEMPORARY_NGRAM_SQL,
                                [(ngram,) for ngram in ngrams])
+
+    def _add_temporary_results_sets (self, results_filenames, labels):
+        if len(labels) < 2:
+            raise MalformedQueryError(
+                constants.INSUFFICIENT_LABELS_QUERY_ERROR)
+        if len(results_filenames) != len(labels):
+            raise MalformedQueryError(
+                constants.SUPPLIED_ARGS_LENGTH_MISMATCH_ERROR)
+        self._create_temporary_results_table()
+        for results_filename, label in zip(results_filenames, labels):
+            with open(results_filename, encoding='utf-8', newline='') as fh:
+                self._add_temporary_results(fh, label)
+        self._add_temporary_results_index()
+        self._analyse('temp.InputResults')
+
+    def _add_temporary_results (self, results, label):
+        """Adds `results` to a temporary table with `label`.
+
+        :param results: results file
+        :type results: `File`
+        :param label: label to be associated with results
+        :type label: `str`
+
+        """
+        NGRAM, SIZE, NAME, SIGLUM, COUNT, LABEL = constants.QUERY_FIELDNAMES
+        reader = csv.DictReader(results)
+        data = [(row[NGRAM], row[SIZE], row[NAME], row[SIGLUM], row[COUNT],
+                 label) for row in reader]
+        self._conn.executemany(constants.INSERT_TEMPORARY_RESULTS_SQL, data)
+
+    def _add_temporary_results_index (self):
+        self._logger.info('Adding index to temporary results table')
+        self._conn.execute(constants.CREATE_INDEX_INPUT_RESULTS_SQL)
+        self._logger.info('Index added')
 
     def _add_text_ngrams (self, text, minimum, maximum):
         """Adds n-gram data from `text` to the data store.
@@ -79,7 +116,13 @@ class DataStore:
         text_id = self._get_text_id(text)
         self._logger.info('Adding n-grams ({} <= n <= {}) for {}'.format(
             minimum, maximum, text.get_filename()))
-        for size, ngrams in text.get_ngrams(minimum, maximum):
+        skip_sizes = []
+        for size in range(minimum, maximum + 1):
+            if self._has_ngrams(text_id, size):
+                self._logger.info('{}-grams are already in the database'.format(
+                    size))
+                skip_sizes.append(size)
+        for size, ngrams in text.get_ngrams(minimum, maximum, skip_sizes):
             self._add_text_size_ngrams(text_id, size, ngrams)
 
     def _add_text_record (self, text):
@@ -90,11 +133,12 @@ class DataStore:
 
         """
         filename = text.get_filename()
+        name, siglum = text.get_names()
         self._logger.info('Adding record for text {}'.format(filename))
         checksum = text.get_checksum()
         token_count = len(text.get_tokens())
         cursor = self._conn.execute(constants.INSERT_TEXT_SQL,
-                                    [filename, checksum, token_count, ''])
+                                    [name, siglum, checksum, token_count, ''])
         self._conn.commit()
         return cursor.lastrowid
 
@@ -111,19 +155,15 @@ class DataStore:
         :type ngrams: `collections.Counter`
 
         """
-        if self._has_ngrams(text_id, size):
-            self._logger.info('{}-grams are already in the database'.format(
-                size))
-        else:
-            unique_ngrams = len(ngrams)
-            self._logger.info('Adding {} unique {}-grams'.format(
-                unique_ngrams, size))
-            parameters = [[text_id, ngram, size, count]
-                          for ngram, count in ngrams.items()]
-            self._conn.execute(constants.INSERT_TEXT_HAS_NGRAM_SQL,
-                               [text_id, size, unique_ngrams])
-            self._conn.executemany(constants.INSERT_NGRAM_SQL, parameters)
-            self._conn.commit()
+        unique_ngrams = len(ngrams)
+        self._logger.info('Adding {} unique {}-grams'.format(
+            unique_ngrams, size))
+        parameters = [[text_id, ngram, size, count]
+                      for ngram, count in ngrams.items()]
+        self._conn.execute(constants.INSERT_TEXT_HAS_NGRAM_SQL,
+                           [text_id, size, unique_ngrams])
+        self._conn.executemany(constants.INSERT_NGRAM_SQL, parameters)
+        self._conn.commit()
 
     def _analyse (self, table=''):
         """Analyses the database, or `table` if it is supplied.
@@ -155,6 +195,10 @@ class DataStore:
         cursor = self._conn.execute(query, labels)
         return self._csv(cursor, constants.COUNTS_FIELDNAMES, output_fh)
 
+    def _create_temporary_results_table (self):
+        self._conn.execute(constants.DROP_TEMPORARY_RESULTS_TABLE_SQL)
+        self._conn.execute(constants.CREATE_TEMPORARY_RESULTS_TABLE_SQL)
+
     def _csv (self, cursor, fieldnames, output_fh):
         """Writes the rows of `cursor` in CSV format to `output_fh`
         and returns it.
@@ -169,7 +213,13 @@ class DataStore:
 
         """
         self._logger.info('Finished query; outputting results in CSV format')
-        writer = csv.writer(output_fh)
+        # Specify a lineterminator to avoid an extra \r being added on
+        # Windows; see
+        # https://stackoverflow.com/questions/3191528/csv-in-python-adding-extra-carriage-return
+        if sys.platform in ('win32', 'cygwin') and output_fh is sys.stdout:
+            writer = csv.writer(output_fh, lineterminator='\n')
+        else:
+            writer = csv.writer(output_fh)
         writer.writerow(fieldnames)
         for row in cursor:
             writer.writerow([row[fieldname] for fieldname in fieldnames])
@@ -189,9 +239,12 @@ class DataStore:
         self._conn.commit()
 
     def diff (self, catalogue, output_fh):
-        """Returns `output_fh` populated with CSV results giving the
-        symmetric difference in n-grams between the labelled sets of
-        texts in `catalogue`.
+        """Returns `output_fh` populated with CSV results giving the n-grams
+        that are unique to each labelled set of texts in `catalogue`.
+
+        Note that this is not the same as the symmetric difference of
+        these sets, except in the case where there are only two
+        labels.
 
         :param catalogue: catalogue matching filenames to labels
         :type catalogue: `Catalogue`
@@ -200,7 +253,9 @@ class DataStore:
         :rtype: file-like object
 
         """
-        labels = list(self._set_labels(catalogue))
+        labels = self._sort_labels(self._set_labels(catalogue))
+        if len(labels) < 2:
+            raise MalformedQueryError(constants.INSUFFICIENT_LABELS_QUERY_ERROR)
         label_placeholders = self._get_placeholders(labels)
         query = constants.SELECT_DIFF_SQL.format(label_placeholders,
                                                  label_placeholders)
@@ -227,7 +282,12 @@ class DataStore:
 
         """
         labels = list(self._set_labels(catalogue))
-        labels.remove(prime_label)
+        if len(labels) < 2:
+            raise MalformedQueryError(constants.INSUFFICIENT_LABELS_QUERY_ERROR)
+        try:
+            labels.remove(prime_label)
+        except ValueError:
+            raise MalformedQueryError(constants.LABEL_NOT_IN_CATALOGUE_ERROR)
         label_placeholders = self._get_placeholders(labels)
         query = constants.SELECT_DIFF_ASYMMETRIC_SQL.format(label_placeholders)
         parameters = [prime_label, prime_label] + labels
@@ -238,36 +298,30 @@ class DataStore:
         cursor = self._conn.execute(query, parameters)
         return self._csv(cursor, constants.QUERY_FIELDNAMES, output_fh)
 
-    def diff_supplied (self, catalogue, supplied, output_fh):
-        """Returns `output_fh` populated with CSV results giving the
-        difference in n-grams between the labelled sets of texts in
-        `catalogue`, limited to those results present in `supplied`.
+    def diff_supplied (self, results_filenames, labels, output_fh):
+        """Returns `output_fh` populated with CSV results giving the n-grams
+        that are unique to each set of texts in `results_sets`, using
+        the labels in `labels`.
 
-        :param catalogue: catalogue matching filenames to labels
-        :type catalogue: `Catalogue`
-        :param supplied: CSV results used to limit query
-        :type supplied: file-like object
+        Note that this is not the same as the symmetric difference of
+        these sets, except in the case where there are only two
+        labels.
+
+        :param results_filenames: list of results filenames to be diffed
+        :type results_filenames: `list` of `str`
+        :param labels: labels to be applied to the results_sets
+        :type labels: `list`
         :param output_fh: object to output results to
         :type output_fh: file-like object
         :rtype: file-like object
 
         """
-        labels = list(self._set_labels(catalogue))
-        supplied_ngrams, supplied_labels = self._process_supplied_results(
-            supplied)
-        labels = [label for label in labels if label not in supplied_labels]
-        label_placeholders = self._get_placeholders(labels)
-        all_labels = labels + supplied_labels
-        all_label_placeholders = self._get_placeholders(all_labels)
-        self._add_temporary_ngrams(supplied_ngrams)
-        query = constants.SELECT_DIFF_SUPPLIED_SQL.format(
-            all_label_placeholders, label_placeholders)
-        parameters = all_labels + labels
-        self._logger.info('Running diff query with supplied results')
-        self._logger.debug('Query: {}\nLabels: {}\nSub-labels: {}'.format(
-            query, all_labels, labels))
-        self._log_query_plan(query, parameters)
-        cursor = self._conn.execute(query, parameters)
+        self._add_temporary_results_sets(results_filenames, labels)
+        query = constants.SELECT_DIFF_SUPPLIED_SQL
+        self._logger.info('Running supplied diff query')
+        self._logger.debug('Query: {}'.format(query))
+        self._log_query_plan(query, [])
+        cursor = self._conn.execute(query)
         return self._csv(cursor, constants.QUERY_FIELDNAMES, output_fh)
 
     def _drop_indices (self):
@@ -315,14 +369,15 @@ class DataStore:
         :rtype: `int`
 
         """
-        filename = text.get_filename()
+        name, siglum = text.get_names()
         text_record = self._conn.execute(constants.SELECT_TEXT_SQL,
-                                         [filename]).fetchone()
+                                         [name, siglum]).fetchone()
         if text_record is None:
             text_id = self._add_text_record(text)
         else:
             text_id = text_record['id']
             if text_record['checksum'] != text.get_checksum():
+                filename = text.get_filename()
                 self._logger.info('Text {} has changed since it was added to '
                                   'the database'.format(filename))
                 self._update_text_record(text, text_id)
@@ -373,6 +428,8 @@ class DataStore:
 
         """
         labels = self._sort_labels(self._set_labels(catalogue))
+        if len(labels) < 2:
+            raise MalformedQueryError(constants.INSUFFICIENT_LABELS_QUERY_ERROR)
         label_placeholders = self._get_placeholders(labels)
         subquery = self._get_intersection_subquery(labels)
         query = constants.SELECT_INTERSECT_SQL.format(label_placeholders,
@@ -384,34 +441,26 @@ class DataStore:
         cursor = self._conn.execute(query, parameters)
         return self._csv(cursor, constants.QUERY_FIELDNAMES, output_fh)
 
-    def intersection_supplied (self, catalogue, supplied, output_fh):
-        """Returns `output_fh` populated with CSV results giving the
-        intersection in n-grams between the labelled sets of texts in
-        `catalogue`, limited to those results present in `supplied`.
+    def intersection_supplied (self, results_filenames, labels, output_fh):
+        """Returns `output_fh` populated with CSV results giving the n-grams
+        that are common to every set of texts in `results_sets`, using
+        the labels in `labels`.
 
-        :param catalogue: catalogue matching filenames to labels
-        :type catalogue: `Catalogue`
-        :param supplied: CSV results used to limit query
-        :type supplied: file-like object
+        :param results_filenames: list of results to be diffed
+        :type results_filenames: `list` of `str`
+        :param labels: labels to be applied to the results_sets
+        :type labels: `list`
         :param output_fh: object to output results to
         :type output_fh: file-like object
         :rtype: file-like object
 
         """
-        labels = self._sort_labels(self._set_labels(catalogue))
-        supplied_ngrams, supplied_labels = self._process_supplied_results(
-            supplied)
-        labels = [label for label in labels if label not in supplied_labels]
-        all_labels = labels + supplied_labels
-        all_label_placeholders = self._get_placeholders(all_labels)
-        self._add_temporary_ngrams(supplied_ngrams)
-        subquery = self._get_intersection_subquery(labels)
-        query = constants.SELECT_INTERSECT_SUPPLIED_SQL.format(
-            all_label_placeholders, subquery)
-        parameters = all_labels + labels
-        self._logger.info('Running intersection query with supplied results')
-        self._logger.debug('Query: {}\nLabels: {}\nSub-labels: {}'.format(
-            query, all_labels, labels))
+        self._add_temporary_results_sets(results_filenames, labels)
+        query = constants.SELECT_INTERSECT_SUPPLIED_SQL
+        parameters = [len(labels)]
+        self._logger.info('Running supplied intersect query')
+        self._logger.debug('Query: {}\nNumber of labels: {}'.format(
+            query, parameters[0]))
         self._log_query_plan(query, parameters)
         cursor = self._conn.execute(query, parameters)
         return self._csv(cursor, constants.QUERY_FIELDNAMES, output_fh)
@@ -422,23 +471,6 @@ class DataStore:
         for row in cursor.fetchall():
             query_plan += '|'.join([str(value) for value in row]) + '\n'
         self._logger.debug(query_plan)
-
-    def _process_supplied_results (self, input_csv):
-        """Returns the unique n-grams and labels used in `input_csv`.
-
-        :param input_csv: query results in CSV format
-        :type input_csv: file-like object
-        :rtype: `tuple` of `list` of `str`
-
-        """
-        self._logger.info('Processing supplied results')
-        reader = csv.DictReader(input_csv)
-        ngrams = set()
-        labels = set()
-        for row in reader:
-            ngrams.add(row[constants.NGRAM_FIELDNAME])
-            labels.add(row[constants.LABEL_FIELDNAME])
-        return list(ngrams), list(labels)
 
     def search (self, catalogue, ngrams, output_fh):
         self._set_labels(catalogue)
@@ -469,10 +501,10 @@ class DataStore:
         """
         self._conn.execute(constants.UPDATE_LABELS_SQL, [''])
         labels = {}
-        for filename, label in catalogue.items():
-            self._conn.execute(constants.UPDATE_LABEL_SQL, [label, filename])
+        for name, label in catalogue.items():
+            self._conn.execute(constants.UPDATE_LABEL_SQL, [label, name])
             cursor = self._conn.execute(constants.SELECT_TEXT_TOKEN_COUNT_SQL,
-                                        [filename])
+                                        [name])
             token_count = cursor.fetchone()['token_count']
             labels[label] = labels.get(label, 0) + token_count
         self._conn.commit()
@@ -521,21 +553,28 @@ class DataStore:
 
         """
         is_valid = True
-        for filename in catalogue:
-            try:
-                checksum = corpus.get_text(filename).get_checksum()
-            except FileNotFoundError:
-                self._logger.error('Catalogue references {} that does not '
-                                   'exist in the corpus'.format(filename))
-                raise
-            row = self._conn.execute(constants.SELECT_TEXT_SQL,
-                                     [filename]).fetchone()
-            if row is None:
-                is_valid = False
-                self._logger.warn('No record (or n-grams) exists for {} in '
-                                     'the database'.format(filename))
-            elif row['checksum'] != checksum:
-                is_valid = False
-                self._logger.warn('{} has changed since its n-grams were '
-                                     'added to the database'.format(filename))
+        for name in catalogue:
+            count = 0
+            # It is unfortunate that this creates Text objects for
+            # each text, since that involves reading the file.
+            for text in corpus.get_texts(name):
+                count += 1
+                name, siglum = text.get_names()
+                filename = text.get_filename()
+                row = self._conn.execute(constants.SELECT_TEXT_SQL,
+                                         [name, siglum]).fetchone()
+                if row is None:
+                    is_valid = False
+                    self._logger.warning(
+                        'No record (or n-grams) exists for {} in '
+                        'the database'.format(filename))
+                elif row['checksum'] != text.get_checksum():
+                    is_valid = False
+                    self._logger.warning(
+                        '{} has changed since its n-grams were '
+                        'added to the database'.format(filename))
+            if count == 0:
+                self._logger.error('Catalogue references text {} that does not '
+                                   'exist in the corpus'.format(name))
+                raise FileNotFoundError
         return is_valid

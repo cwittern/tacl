@@ -12,6 +12,7 @@ Contents:
    :maxdepth: 1
 
    installation
+   guide
    scripts/tacl
    scripts/tacl-helper
 
@@ -38,12 +39,19 @@ of their `n-grams`_. There are several steps in the preparation and
 analysis of the corpus, as listed with example commands:
 
 1. Preprocess the texts in the corpus in order to remove material that
-   is not relevant to the analysis (the :doc:`tacl strip
-   </scripts/tacl-strip>` command). This creates modified files in a
+   is not relevant to the analysis (the :doc:`tacl prepare
+   </scripts/tacl-prepare>` and :doc:`tacl strip
+   </scripts/tacl-strip>` commands). This creates modified files in a
    separate directory, and it is this directory and these files that
    are the considered the corpus for the remaining steps. ::
 
-       tacl strip path/XML/dir path/stripped/dir
+       tacl prepare path/XML/dir path/prepared/dir
+       tacl strip path/prepared/dir path/stripped/dir
+
+   Note that the output format is simply plain text. If you already
+   have plain text files, then this step is not necessary. The
+   processing is also specific to the style of TEI XML used by the
+   CBETA corpus as per the 2011 CD release.
 
 2. Generate the n-grams that will be used in the analysis (:doc:`tacl
    ngrams </scripts/tacl-ngrams>`). This is typically the slowest part
@@ -66,12 +74,12 @@ analysis of the corpus, as listed with example commands:
 
    An example catalogue: ::
 
-       T0237.txt Vaj
-       T0097.txt AV
-       T0667.txt P-ref
-       T1461.txt P-ref
-       T1559.txt
-       T2137.txt
+       T0237 Vaj
+       T0097 AV
+       T0667 P-ref
+       T1461 P-ref
+       T1559
+       T2137
 
 4. Analyse the n-grams to find either the difference between
    (:doc:`tacl diff <scripts/tacl-diff>`) or intersection of
@@ -87,6 +95,18 @@ analysis of the corpus, as listed with example commands:
    report </scripts/tacl-report>`). ::
 
        tacl report --reduce --min-count 5 diff-results.csv > reduced-diff-results.csv
+
+6. Display a side by side comparison of matching parts of pairs of
+   texts in a set of intersection query results (:doc:`tacl align
+   </scripts/tacl-align>`). ::
+
+       tacl align path/stripped/dir path/output/dir intersect-results.csv
+
+7. Display one text with the option to highlight matches from other
+   texts in a set of intersection query results, producing a heatmap
+   visualisation (:doc:`tacl highlight </scripts/tacl-highlight>`). ::
+
+       tacl highlight path/stripped/dir intersect-results.csv text-name witness-siglum
 
 Another script, :doc:`tacl-helper </scripts/tacl-helper>`, can be used
 to create sets of catalogue files and prepare batches of commands for

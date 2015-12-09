@@ -2,6 +2,7 @@ import os.path
 import unittest
 
 import tacl
+from tacl.exceptions import MalformedCatalogueError
 
 
 class CatalogueIntegrationTest (unittest.TestCase):
@@ -12,8 +13,13 @@ class CatalogueIntegrationTest (unittest.TestCase):
     def test_load (self):
         catalogue = tacl.Catalogue()
         catalogue.load(os.path.join(self._data_dir, 'catalogue2.txt'))
-        expected_dict = {'1.txt': 'A', '2.txt': 'B', '3.txt': 'C', '5.txt': 'A'}
+        expected_dict = {'T1': 'A', 'T2': 'B', 'T3': 'C', 'T5': 'A'}
         self.assertEqual(catalogue, expected_dict)
+
+    def test_load_relabelled_text (self):
+        catalogue = tacl.Catalogue()
+        path = os.path.join(self._data_dir, 'catalogue_relabel.txt')
+        self.assertRaises(MalformedCatalogueError, catalogue.load, path)
 
 
 if __name__ == '__main__':

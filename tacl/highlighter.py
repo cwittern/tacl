@@ -3,10 +3,12 @@
 import logging
 import re
 
+from jinja2 import Environment, PackageLoader
 from lxml import etree
 import pandas as pd
 
 from . import constants
+from .text import Text
 
 
 class Highlighter:
@@ -20,7 +22,7 @@ class Highlighter:
         match = match_obj.group(0)
         root = etree.fromstring('<div>{}</div>'.format(match))
         for span in root.xpath('//span'):
-            # The resuls are not guaranteed to have non-base matches
+            # The results are not guaranteed to have non-base matches
             # in it, so do not rely on being able to derive base
             # matches from them.
             if self._match_source == self._base_filename:
@@ -33,7 +35,21 @@ class Highlighter:
                     span.set('data-texts', new_value)
         return etree.tostring(root, encoding='unicode')[5:-6]
 
-    def generate_base (self, matches, filename, all=True):
+    def _format_text (self, text):
+        """Returns `text` with consecutive spaces converted to non-break
+        spaces, and linebreak converted into HTML br elements.
+
+        :param text: text to format
+        :type text: `str`
+        :rtype: `str`
+
+        """
+        text = re.sub(r'\n', '<br/>\n', text)
+        text = re.sub(r'  ', '&#160;&#160;', text)
+        text = re.sub(r'&#160; ', '&#160;&#160;', text)
+        return text
+
+    def generate_base (self, matches, text_name, siglum, all=True):
         """Returns an XML document containing the text of `filename`
         marked up with its n-grams in `matches`.
 
@@ -42,42 +58,45 @@ class Highlighter:
 
         :param matches: matches data
         :type matches: `pandas.DataFrame`
-        :param filename: filename of text to generate an XML document from
-        :type filename: `str`
+        :param text_name: name of text to generate an XML document from
+        :type text_name: `str`
+        :param siglum: siglum of text variant to generate an XML document from
+        :type siglum: `str`
         :rtype: `lxml.etree._Element`
 
         """
+        text = self._corpus.get_text(text_name, siglum)
+        filename = text.get_filename()
         self._logger.debug('Generating the base XML file for {}'.format(
             filename))
         self._base_filename = filename
-        text = self._corpus.get_text(filename).get_content().strip()
-        text = self._prepare_text(text)
+        content = text.get_content().strip()
+        content = self._prepare_text(content)
         if not all:
-            matches = matches[matches[constants.FILENAME_FIELDNAME] == filename]
-        text = self._highlight(text, matches)
-        root = etree.fromstring('<div>{}</div>'.format(text))
+            matches = matches[matches[constants.NAME_FIELDNAME] == filename]
+        content = self._highlight(content, matches)
+        content = self._format_text(content)
+        root = etree.fromstring('<div>{}</div>'.format(content))
         return root
 
-    def _generate_html (self, matches, base_filename, text):
-        text_list = self._generate_text_list(matches, base_filename)
-        text_list_html = self._generate_text_list_html(text_list)
-        text_data = {'base_filename': base_filename, 'text': text,
-                     'text_list': text_list_html}
-        return constants.HIGHLIGHT_TEMPLATE.format(**text_data)
+    def _generate_html (self, matches, text_name, siglum, text):
+        loader = PackageLoader('tacl', 'assets/templates')
+        env = Environment(loader=loader)
+        text_list = self._generate_text_list(matches, text_name, siglum)
+        text_data = {'base_name': text_name, 'base_siglum': siglum,
+                     'text': text, 'text_list': text_list}
+        template = env.get_template('highlight.html')
+        return template.render(text_data)
 
     @staticmethod
-    def _generate_text_list (matches, base_filename):
-        text_list = list(matches[constants.FILENAME_FIELDNAME].unique())
-        text_list.remove(base_filename)
+    def _generate_text_list (matches, base_name, base_siglum):
+        texts = matches[[constants.NAME_FIELDNAME,
+                         constants.SIGLUM_FIELDNAME]].drop_duplicates()
+        text_list = []
+        for index, (name, siglum) in texts.iterrows():
+            if not(name == base_name and siglum == base_siglum):
+                text_list.append(Text.assemble_filename(name, siglum))
         text_list.sort()
-        return text_list
-
-    @staticmethod
-    def _generate_text_list_html (texts):
-        widgets = []
-        for text in texts:
-            widgets.append('<li><input type="checkbox" name="text" value="{0}"> {0}'.format(text))
-        text_list = '<form><ul>{}</ul></form>'.format(''.join(widgets))
         return text_list
 
     def _get_regexp_pattern (self, ngram):
@@ -86,7 +105,7 @@ class Highlighter:
             [re.escape(token) for token in self._tokenizer.tokenize(ngram)])
         return r'(<span[^>]*>{}</span>)'.format(pattern)
 
-    def highlight (self, matches_filename, text_filename):
+    def highlight (self, matches_filename, text_name, siglum):
         """Returns the text of `filename` as an HTML document with its matches
         in `matches` highlighted.
 
@@ -94,19 +113,23 @@ class Highlighter:
         :type results: `TextIOWrapper`
         :param corpus: corpus of documents containing `text_filename`
         :type corpus: `tacl.Corpus`
-        :param filename: filename of text to highlight
-        :type filename: `str`
+        :param text_name: name of text to highlight
+        :type text_name: `str`
+        :param siglum: siglum of text to highlight
+        :type siglum: `str`
+        :rtype: `str`
 
         """
         matches = pd.read_csv(matches_filename)
-        base = self.generate_base(matches, text_filename, all=True)
+        base = self.generate_base(matches, text_name, siglum, all=True)
         text = etree.tostring(base, encoding='unicode', xml_declaration=False)
-        return self._generate_html(matches, text_filename, text)
+        return self._generate_html(matches, text_name, siglum, text)
 
     def _highlight (self, text, matches):
         for row_index, row in matches.iterrows():
             ngram = row[constants.NGRAM_FIELDNAME]
-            self._match_source = row[constants.FILENAME_FIELDNAME]
+            self._match_source = Text.assemble_filename(
+                row[constants.NAME_FIELDNAME], row[constants.SIGLUM_FIELDNAME])
             pattern = self._get_regexp_pattern(ngram)
             text = re.sub(pattern, self._annotate_tokens, text)
         return text
